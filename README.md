@@ -1,1 +1,1 @@
-# heart-cli
+# My Heart CLI
