@@ -11,7 +11,7 @@ export default function Home() {
         <HeartCanvas />
         <div className="caption">
           <strong>ECG HEART</strong>
-          <span>3D pulse line loop</span>
+          <span>Particle heart beat</span>
         </div>
       </div>
     </main>
