@@ -9,6 +9,7 @@ type HeartBeatProps = {
 };
 
 const CORE_COLOR = "#ff2d55";
+const POINT_COUNT = 7200;
 
 function usePrefersReducedMotion() {
   const [reducedMotion, setReducedMotion] = useState(false);
@@ -32,121 +33,90 @@ function usePrefersReducedMotion() {
   return reducedMotion;
 }
 
-function buildHeartPath() {
-  const raw: THREE.Vector3[] = [];
-  const samples = 240;
+function heartMask(x: number, y: number) {
+  const a = x * x + y * y - 1;
+  return a * a * a - x * x * y * y * y;
+}
 
-  for (let i = 0; i <= samples; i += 1) {
-    const t = (i / samples) * Math.PI * 2;
-    const x = 16 * Math.pow(Math.sin(t), 3);
-    const y =
-      13 * Math.cos(t) -
-      5 * Math.cos(2 * t) -
-      2 * Math.cos(3 * t) -
-      Math.cos(4 * t);
-    raw.push(new THREE.Vector3(x, y, 0));
+function buildHeartPoints(count: number, bias = 0.45) {
+  const points: THREE.Vector3[] = [];
+  const max = 1.35;
+
+  while (points.length < count) {
+    const x = THREE.MathUtils.lerp(-max, max, Math.random());
+    const y = THREE.MathUtils.lerp(-max, max, Math.random());
+    if (heartMask(x, y) <= 0) {
+      const r = Math.min(Math.sqrt((x * x + y * y) / (max * max)), 1);
+      const weight = 1 - r * bias;
+      if (Math.random() <= weight) {
+        points.push(new THREE.Vector3(x, y, 0));
+      }
+    }
   }
 
-  const box = new THREE.Box3().setFromPoints(raw);
+  const bounds = new THREE.Box3().setFromPoints(points);
   const size = new THREE.Vector3();
-  box.getSize(size);
+  bounds.getSize(size);
 
-  const targetWidth = 2.2;
-  const targetHeight = 2.0;
+  const targetWidth = 2.6;
+  const targetHeight = 2.3;
   const scale = Math.min(targetWidth / size.x, targetHeight / size.y);
 
-  const scaled = raw.map((point) => point.clone().multiplyScalar(scale));
-  const scaledBox = new THREE.Box3().setFromPoints(scaled);
+  const scaled = points.map((point) => point.clone().multiplyScalar(scale));
+  const scaledBounds = new THREE.Box3().setFromPoints(scaled);
   const center = new THREE.Vector3();
-  scaledBox.getCenter(center);
+  scaledBounds.getCenter(center);
 
-  const centered = scaled.map((point) => point.clone().sub(center));
+  return scaled.map((point) => point.clone().sub(center));
+}
 
-  let leftIndex = 0;
-  for (let i = 1; i < centered.length; i += 1) {
-    if (centered[i].x < centered[leftIndex].x) {
-      leftIndex = i;
-    }
-  }
-
-  const reordered = [
-    ...centered.slice(leftIndex),
-    ...centered.slice(0, leftIndex)
-  ];
-
-  const baselineShift = reordered[0].y;
-  const baselineY = 0.08;
-  const shifted = reordered.map(
-    (point) => new THREE.Vector3(point.x, point.y - baselineShift + baselineY, 0)
-  );
-
-  const heartCurve = new THREE.CatmullRomCurve3(shifted, true, "catmullrom", 0.6);
-  const heartPoints = heartCurve.getPoints(360);
-
-  let minX = heartPoints[0].x;
-  let maxX = heartPoints[0].x;
-
-  for (const point of heartPoints) {
-    if (point.x < minX) {
-      minX = point.x;
-    }
-    if (point.x > maxX) {
-      maxX = point.x;
-    }
-  }
-
-  const leadInStart = minX - 1.7;
-  const leadOutEnd = maxX + 1.7;
-  const leadSamples = 40;
-
-  const leadIn: THREE.Vector3[] = [];
-  const leadOut: THREE.Vector3[] = [];
-
-  for (let i = 0; i <= leadSamples; i += 1) {
-    const x = THREE.MathUtils.lerp(leadInStart, minX, i / leadSamples);
-    leadIn.push(new THREE.Vector3(x, baselineY, 0));
-  }
-
-  for (let i = 1; i <= leadSamples; i += 1) {
-    const x = THREE.MathUtils.lerp(minX, leadOutEnd, i / leadSamples);
-    leadOut.push(new THREE.Vector3(x, baselineY, 0));
-  }
-
-  const pathPoints = [...leadIn, ...heartPoints, ...leadOut];
-
-  return new THREE.CatmullRomCurve3(pathPoints, false, "catmullrom", 0.35);
+function heartbeatWave(t: number) {
+  const cycle = 1.8;
+  const local = t % cycle;
+  const spikeA = Math.exp(-Math.pow((local - 0.28) / 0.08, 2));
+  const spikeB = Math.exp(-Math.pow((local - 0.72) / 0.12, 2)) * 0.65;
+  return spikeA + spikeB;
 }
 
 function HeartBeat({ reducedMotion }: HeartBeatProps) {
   const groupRef = useRef<THREE.Group>(null);
 
-  const path = useMemo(() => buildHeartPath(), []);
-  const coreGeometry = useMemo(
-    () => new THREE.TubeGeometry(path, 920, 0.02, 10, false),
-    [path]
-  );
-  const glowGeometry = useMemo(
-    () => new THREE.TubeGeometry(path, 920, 0.05, 12, false),
-    [path]
-  );
-  const traceGeometry = useMemo(
-    () => new THREE.TubeGeometry(path, 700, 0.012, 6, false),
-    [path]
-  );
+  const data = useMemo(() => {
+    const heartPoints = buildHeartPoints(POINT_COUNT, 0.4);
+    const scatter = new Float32Array(POINT_COUNT * 3);
+    const targets = new Float32Array(POINT_COUNT * 3);
+    const seeds = new Float32Array(POINT_COUNT);
 
-  const coreCount = coreGeometry.index?.count ?? coreGeometry.attributes.position.count;
-  const glowCount = glowGeometry.index?.count ?? glowGeometry.attributes.position.count;
+    const scatterWidth = 8.2;
+    const scatterHeight = 5.6;
+    const scatterDepth = 2.6;
+
+    for (let i = 0; i < POINT_COUNT; i += 1) {
+      const index = i * 3;
+      const heart = heartPoints[i % heartPoints.length];
+
+      targets[index] = heart.x;
+      targets[index + 1] = heart.y;
+      targets[index + 2] = (Math.random() - 0.5) * 0.35;
+
+      scatter[index] = (Math.random() - 0.5) * scatterWidth;
+      scatter[index + 1] = (Math.random() - 0.5) * scatterHeight;
+      scatter[index + 2] = (Math.random() - 0.5) * scatterDepth;
+
+      seeds[i] = Math.random() * Math.PI * 2;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(scatter.slice(), 3));
+
+    return { geometry, scatter, targets, seeds };
+  }, []);
 
   useEffect(() => {
-    coreGeometry.setDrawRange(0, reducedMotion ? coreCount : 0);
-    glowGeometry.setDrawRange(0, reducedMotion ? glowCount : 0);
-
     return () => {
-      coreGeometry.dispose();
-      glowGeometry.dispose();
-      traceGeometry.dispose();
+      data.geometry.dispose();
     };
-  }, [coreGeometry, glowGeometry, traceGeometry, coreCount, glowCount, reducedMotion]);
+  }, [data]);
 
   useFrame((state) => {
     if (reducedMotion) {
@@ -154,56 +124,80 @@ function HeartBeat({ reducedMotion }: HeartBeatProps) {
     }
 
     const t = state.clock.getElapsedTime();
-    const cycle = 3.2;
-    const hold = 0.35;
-    const total = cycle + hold;
-    const local = t % total;
-    const raw = Math.min(local / cycle, 1);
-    const eased = raw * raw * (3 - 2 * raw);
+    const gatherDuration = 2.8;
+    const gatherRaw = Math.min(t / gatherDuration, 1);
+    const gather = gatherRaw * gatherRaw * (3 - 2 * gatherRaw);
+    const beat = heartbeatWave(Math.max(0, t - gatherDuration));
+    const breathe = Math.sin(t * 0.4) * 0.008;
+    const pulse = 1 + beat * 0.07 + breathe;
 
-    const coreDraw = Math.max(2, Math.floor(coreCount * eased));
-    const glowDraw = Math.max(2, Math.floor(glowCount * eased));
+    const positions = data.geometry.attributes.position.array as Float32Array;
 
-    coreGeometry.setDrawRange(0, coreDraw);
-    glowGeometry.setDrawRange(0, glowDraw);
+    for (let i = 0; i < POINT_COUNT; i += 1) {
+      const index = i * 3;
+      const seed = data.seeds[i];
+      const wander = Math.sin(t * 1.2 + seed) * 0.03;
+      const drift = Math.cos(t * 0.9 + seed) * 0.02;
 
-    const pulse = 1 + Math.sin(t * 2.4) * 0.02;
+      const targetX = data.targets[index] * pulse + wander;
+      const targetY = data.targets[index + 1] * pulse + drift;
+      const targetZ = data.targets[index + 2] * pulse + Math.sin(t + seed) * 0.01;
+
+      positions[index] = THREE.MathUtils.lerp(data.scatter[index], targetX, gather);
+      positions[index + 1] = THREE.MathUtils.lerp(data.scatter[index + 1], targetY, gather);
+      positions[index + 2] = THREE.MathUtils.lerp(data.scatter[index + 2], targetZ, gather);
+    }
+
+    data.geometry.attributes.position.needsUpdate = true;
 
     if (groupRef.current) {
-      groupRef.current.scale.setScalar(pulse);
-      groupRef.current.rotation.x = -0.2 + Math.sin(t * 0.3) * 0.02;
-      groupRef.current.rotation.y = 0.35 + Math.sin(t * 0.2) * 0.03;
+      groupRef.current.rotation.x = -0.18 + Math.sin(t * 0.3) * 0.04;
+      groupRef.current.rotation.y = 0.4 + Math.cos(t * 0.25) * 0.05;
     }
   });
 
+  useEffect(() => {
+    if (!reducedMotion) {
+      return;
+    }
+
+    const positions = data.geometry.attributes.position.array as Float32Array;
+
+    for (let i = 0; i < POINT_COUNT; i += 1) {
+      const index = i * 3;
+      positions[index] = data.targets[index];
+      positions[index + 1] = data.targets[index + 1];
+      positions[index + 2] = data.targets[index + 2];
+    }
+
+    data.geometry.attributes.position.needsUpdate = true;
+  }, [data, reducedMotion]);
+
   return (
     <group ref={groupRef}>
-      <mesh geometry={traceGeometry}>
-        <meshBasicMaterial
+      <points geometry={data.geometry} frustumCulled={false}>
+        <pointsMaterial
           color={CORE_COLOR}
-          opacity={0.15}
+          size={0.028}
+          sizeAttenuation
           transparent
+          opacity={0.9}
+          depthWrite={false}
           toneMapped={false}
         />
-      </mesh>
-      <mesh geometry={glowGeometry}>
-        <meshBasicMaterial
+      </points>
+      <points geometry={data.geometry} frustumCulled={false}>
+        <pointsMaterial
           color={CORE_COLOR}
-          opacity={0.2}
+          size={0.095}
+          sizeAttenuation
           transparent
+          opacity={0.18}
+          depthWrite={false}
           blending={THREE.AdditiveBlending}
           toneMapped={false}
         />
-      </mesh>
-      <mesh geometry={coreGeometry}>
-        <meshBasicMaterial
-          color={CORE_COLOR}
-          opacity={0.95}
-          transparent
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </mesh>
+      </points>
     </group>
   );
 }
@@ -215,7 +209,7 @@ export default function HeartCanvas() {
     <div className="canvas-wrap" aria-hidden="true">
       <Canvas
         dpr={[1, 1.8]}
-        camera={{ position: [0, 0, 5], fov: 40 }}
+        camera={{ position: [0, 0, 6], fov: 38 }}
         gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
       >
         <HeartBeat reducedMotion={reducedMotion} />
